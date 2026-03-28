@@ -1,4 +1,4 @@
 target/
 *.tar.gz
-benchmark-results/
+benchmark-results/*.csv
 /tmp/
