@@ -1,0 +1,141 @@
+name: Build Static Light Client
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream ckb-light-client tag to build (e.g. v0.5.5-rc1)'
+        required: true
+        default: 'v0.5.5-rc1'
+  schedule:
+    # Check for new upstream releases weekly
+    - cron: '0 6 * * 1'
+
+env:
+  UPSTREAM_REPO: nervosnetwork/ckb-light-client
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl
+            cross_compiler: aarch64-linux-musl
+            pkg_suffix: aarch64-linux-musl-static
+          - target: x86_64-unknown-linux-musl
+            cross_compiler: x86_64-linux-musl
+            pkg_suffix: x86_64-linux-musl-static
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Get upstream tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.upstream_tag }}" >> $GITHUB_OUTPUT
+          else
+            # Find latest release
+            TAG=$(curl -s https://api.github.com/repos/$UPSTREAM_REPO/releases/latest | jq -r .tag_name)
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Clone upstream
+        run: |
+          git clone --depth 1 --branch ${{ steps.tag.outputs.tag }} \
+            https://github.com/$UPSTREAM_REPO.git upstream
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup override set 1.92.0
+          rustup target add ${{ matrix.target }}
+
+      - name: Install musl cross-compiler
+        run: |
+          curl -fsSL -o /tmp/musl-cross.tgz \
+            "https://musl.cc/${{ matrix.cross_compiler }}-cross.tgz"
+          tar xzf /tmp/musl-cross.tgz -C /tmp/
+
+      - name: Configure cargo for cross-compilation
+        run: |
+          mkdir -p upstream/.cargo
+          cat > upstream/.cargo/config.toml << EOF
+          [target.${{ matrix.target }}]
+          linker = "/tmp/${{ matrix.cross_compiler }}-cross/bin/${{ matrix.cross_compiler }}-gcc"
+          EOF
+
+      - name: Build
+        env:
+          CC_aarch64_unknown_linux_musl: /tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
+          CXX_aarch64_unknown_linux_musl: /tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-g++
+          AR_aarch64_unknown_linux_musl: /tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-ar
+          CC_x86_64_unknown_linux_musl: /tmp/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
+          CXX_x86_64_unknown_linux_musl: /tmp/x86_64-linux-musl-cross/bin/x86_64-linux-musl-g++
+          AR_x86_64_unknown_linux_musl: /tmp/x86_64-linux-musl-cross/bin/x86_64-linux-musl-ar
+        run: |
+          cd upstream/light-client-bin
+          cargo build --release --target ${{ matrix.target }} \
+            --no-default-features --features sqlite
+
+      - name: Strip binary
+        run: |
+          /tmp/${{ matrix.cross_compiler }}-cross/bin/${{ matrix.cross_compiler }}-strip \
+            upstream/target/${{ matrix.target }}/release/ckb-light-client
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp upstream/target/${{ matrix.target }}/release/ckb-light-client dist/
+          cd dist
+          tar czf ../ckb-light-client-${{ steps.tag.outputs.tag }}-${{ matrix.pkg_suffix }}.tar.gz \
+            ckb-light-client
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ckb-light-client-${{ matrix.pkg_suffix }}
+          path: ckb-light-client-*.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Get tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.upstream_tag }}" >> $GITHUB_OUTPUT
+          else
+            TAG=$(curl -s https://api.github.com/repos/nervosnetwork/ckb-light-client/releases/latest | jq -r .tag_name)
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}-musl-static
+          name: "CKB Light Client Lite ${{ steps.tag.outputs.tag }}"
+          body: |
+            Static musl builds of [ckb-light-client ${{ steps.tag.outputs.tag }}](https://github.com/nervosnetwork/ckb-light-client/releases/tag/${{ steps.tag.outputs.tag }}).
+
+            **Changes from upstream:**
+            - Built with `--target *-unknown-linux-musl` (static linking)
+            - SQLite backend instead of RocksDB (`--features sqlite --no-default-features`)
+            - Zero system dependencies — runs on any Linux regardless of GLIBC version
+
+            **Tested on:** Anbernic RG-ARC-D/S (Buildroot, GLIBC 2.32), RG35XXH (Knulli)
+          files: |
+            ckb-light-client-aarch64-linux-musl-static/*.tar.gz
+            ckb-light-client-x86_64-linux-musl-static/*.tar.gz
