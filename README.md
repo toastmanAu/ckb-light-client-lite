@@ -76,7 +76,20 @@ cargo build --release --target aarch64-unknown-linux-musl \
 
 ## Standard vs Lite Comparison
 
-_Benchmark results will be added after running `benchmark.sh`._
+Benchmarked on Intel i7-14700KF, 62GB RAM, NVMe SSD. 60 seconds of testnet sync per binary. Full report: [`benchmark-results/`](benchmark-results/)
+
+| Metric | Standard (RocksDB) | Lite (SQLite) | Delta |
+|--------|-------------------|---------------|-------|
+| Binary Size | 30.0 MB | 18 MB (musl stripped) | **-40%** |
+| Peak Memory (RSS) | 53.6 MB | 44.0 MB | **-18%** |
+| Disk (DB after 60s) | 132 MB | 2.4 MB | **-98%** |
+| Startup to RPC | 510ms | 512ms | Same |
+| CPU Usage | 0.2% | 0.3% | Same |
+| RPC Latency | 5ms | 5ms | Same |
+| Threads | 34 | 31 | -3 |
+| Min GLIBC | 2.34 | **None** | Static |
+
+The SQLite backend is not a compromise — RocksDB is designed for write-heavy full nodes. The light client's read-mostly pattern is a better fit for SQLite, which also uses 98% less disk space.
 
 ## What Changes from Upstream
 
