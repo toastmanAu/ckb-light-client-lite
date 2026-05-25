@@ -14,6 +14,8 @@ on:
 env:
   UPSTREAM_REPO: nervosnetwork/ckb-light-client
   CARGO_TERM_COLOR: always
+  # Strip symbols at link time (rustc >= 1.59) — no external strip tool needed
+  RUSTFLAGS: -C strip=symbols
 
 permissions:
   contents: write
@@ -26,10 +28,8 @@ jobs:
       matrix:
         include:
           - target: aarch64-unknown-linux-musl
-            cross_compiler: aarch64-linux-musl
             pkg_suffix: aarch64-linux-musl-static
           - target: x86_64-unknown-linux-musl
-            cross_compiler: x86_64-linux-musl
             pkg_suffix: x86_64-linux-musl-static
 
     steps:
@@ -38,64 +38,64 @@ jobs:
 
       - name: Get upstream tag
         id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.upstream_tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.upstream_tag }}" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Validate tag format: only allow [A-Za-z0-9._-]
+            if ! printf '%s' "$INPUT_TAG" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+              echo "::error::Invalid tag format: $INPUT_TAG" >&2
+              exit 1
+            fi
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
           else
             # Find latest release
-            TAG=$(curl -s https://api.github.com/repos/$UPSTREAM_REPO/releases/latest | jq -r .tag_name)
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            TAG=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest" | jq -r .tag_name)
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Clone upstream
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          git clone --depth 1 --branch ${{ steps.tag.outputs.tag }} \
-            https://github.com/$UPSTREAM_REPO.git upstream
+          git clone --depth 1 --branch "$TAG" \
+            "https://github.com/$UPSTREAM_REPO.git" upstream
 
       - name: Install Rust
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           rustup toolchain install 1.92.0 --profile minimal
           rustup override set 1.92.0
-          rustup target add ${{ matrix.target }}
+          rustup target add "$TARGET"
 
-      - name: Install musl cross-compiler
-        run: |
-          curl -fsSL -o /tmp/musl-cross.tgz \
-            "https://musl.cc/${{ matrix.cross_compiler }}-cross.tgz"
-          tar xzf /tmp/musl-cross.tgz -C /tmp/
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
 
-      - name: Configure cargo for cross-compilation
-        run: |
-          mkdir -p upstream/.cargo
-          cat > upstream/.cargo/config.toml << EOF
-          [target.${{ matrix.target }}]
-          linker = "/tmp/${{ matrix.cross_compiler }}-cross/bin/${{ matrix.cross_compiler }}-gcc"
-          EOF
+      - name: Install cargo-zigbuild
+        run: pip3 install --user cargo-zigbuild==0.20.0
 
       - name: Build
         env:
-          CC_aarch64_unknown_linux_musl: /tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
-          CXX_aarch64_unknown_linux_musl: /tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-g++
-          AR_aarch64_unknown_linux_musl: /tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-ar
-          CC_x86_64_unknown_linux_musl: /tmp/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
-          CXX_x86_64_unknown_linux_musl: /tmp/x86_64-linux-musl-cross/bin/x86_64-linux-musl-g++
-          AR_x86_64_unknown_linux_musl: /tmp/x86_64-linux-musl-cross/bin/x86_64-linux-musl-ar
+          TARGET: ${{ matrix.target }}
         run: |
           cd upstream/light-client-bin
-          cargo build --release --target ${{ matrix.target }} \
+          cargo zigbuild --release --target "$TARGET" \
             --no-default-features --features sqlite
 
-      - name: Strip binary
-        run: |
-          /tmp/${{ matrix.cross_compiler }}-cross/bin/${{ matrix.cross_compiler }}-strip \
-            upstream/target/${{ matrix.target }}/release/ckb-light-client
-
       - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          PKG_SUFFIX: ${{ matrix.pkg_suffix }}
         run: |
           mkdir -p dist
-          cp upstream/target/${{ matrix.target }}/release/ckb-light-client dist/
+          cp "upstream/target/$TARGET/release/ckb-light-client" dist/
           cd dist
-          tar czf ../ckb-light-client-${{ steps.tag.outputs.tag }}-${{ matrix.pkg_suffix }}.tar.gz \
+          tar czf "../ckb-light-client-${TAG}-${PKG_SUFFIX}.tar.gz" \
             ckb-light-client
 
       - name: Upload artifact
@@ -114,12 +114,19 @@ jobs:
 
       - name: Get tag
         id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.upstream_tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.upstream_tag }}" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! printf '%s' "$INPUT_TAG" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+              echo "::error::Invalid tag format: $INPUT_TAG" >&2
+              exit 1
+            fi
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
           else
-            TAG=$(curl -s https://api.github.com/repos/nervosnetwork/ckb-light-client/releases/latest | jq -r .tag_name)
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            TAG=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest" | jq -r .tag_name)
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create Release
