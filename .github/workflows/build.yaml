@@ -50,8 +50,11 @@ jobs:
             fi
             echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
           else
-            # Find latest release
-            TAG=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest" | jq -r .tag_name)
+            # Most recent release INCLUDING prereleases.
+            # The SQLite backend (required by this project) only exists from
+            # upstream v0.5.5-rc1 onward; /releases/latest skips prereleases
+            # and would keep picking v0.5.4, which can't build.
+            TAG=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases?per_page=1" | jq -r '.[0].tag_name')
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           fi
 
@@ -125,7 +128,8 @@ jobs:
             fi
             echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
           else
-            TAG=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest" | jq -r .tag_name)
+            # Most recent release including prereleases (see build job).
+            TAG=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases?per_page=1" | jq -r '.[0].tag_name')
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           fi
 
